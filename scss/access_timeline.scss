@@ -1,0 +1,21 @@
+body.access-timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.access-timeline {
+  #header-container {
+    border-bottom: 1px solid #ccc;
+  }
+
+  #contents {
+    flex-grow: 1;
+    overflow: hidden;
+    position: relative;
+
+    .rendure-canvas {
+      width: 100%;
+      height: 100%;
+    }
+  }
+}

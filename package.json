@@ -1,0 +1,64 @@
+{
+    "name": "@spcl/cats-viz",
+    "version": "0.1.0",
+    "description": "Whole Program Performance Visualizations Powered by C.A.T.S. Traces",
+    "homepage": "https://github.com/spcl/cats-viz",
+    "main": "out/index.js",
+    "types": "out/index.d.js",
+    "keywords": [
+        "cats",
+        "traces",
+        "performance",
+        "visualization",
+        "spcl"
+    ],
+    "engines": {
+        "node": ">=22.17.0"
+    },
+    "bugs": {
+        "url": "https://github.com/spcl/cats-viz/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/spcl/cats-viz.git"
+    },
+    "license": "BSD-3-Clause",
+    "scripts": {
+        "clean": "rimraf dist && rimraf out",
+        "type-check": "tsc --noEmit",
+        "build-dev": "npm run clean && webpack --config-name=main --mode=development",
+        "serve": "npm run clean && webpack serve --config-name=main --mode=development",
+        "build-prod": "npm run clean && webpack --mode=production",
+        "test": "jest"
+    },
+    "dependencies": {
+        "assert": "^2.1.0",
+        "bootstrap": "^5.3.7",
+        "browserify-zlib": "^0.2.0",
+        "buffer": "^6.0.3",
+        "chart.js": "^4.5.0",
+        "chartjs-plugin-datalabels": "^2.2.0",
+        "jquery": "^3.7.1",
+        "process": "^0.11.10",
+        "rendure": "0.1.0",
+        "stream-browserify": "^3.0.0"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.31.0",
+        "css-loader": "^7.1.2",
+        "eslint": "^9.31.0",
+        "globals": "^16.3.0",
+        "sass": "1.77.6",
+        "sass-loader": "^16.0.5",
+        "style-loader": "^4.0.0",
+        "ts-loader": "^9.5.2",
+        "typescript": "^5.8.3",
+        "typescript-eslint": "^8.37.0",
+        "webpack": "^5.100.2",
+        "webpack-cli": "^6.0.1",
+        "webpack-dev-server": "^5.2.2"
+    },
+    "workspaces": [
+        "packages/*"
+    ]
+}
