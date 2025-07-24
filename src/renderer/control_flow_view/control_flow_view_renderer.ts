@@ -180,4 +180,12 @@ export class ControlFlowViewRenderer extends HTMLCanvasRenderer {
         }
     }
 
+    protected setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        this.cfSequence?.setTemporaryContext(ctx);
+    }
+
+    protected restoreContext(): void {
+        this.cfSequence?.restoreContext();
+    }
+
 }

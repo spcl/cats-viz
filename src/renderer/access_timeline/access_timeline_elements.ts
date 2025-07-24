@@ -224,8 +224,6 @@ export class TimelineChart extends TimelineViewElement {
         this.readAccesses = [];
         this.writeAccesses = [];
 
-        this._allocBoundingPolygon.push({ x: 0, y: 0 });
-
         let time = 0;
         let inStackTop = 0;
         let inOutStackTop = inStackTop - (inSize * this.scaleY);
@@ -269,11 +267,11 @@ export class TimelineChart extends TimelineViewElement {
                     elemMap.set(data[0], allocatedElem);
 
                     this._allocBoundingPolygon.push({
-                        x: time,
+                        x: allocatedElem.x,
                         y: allocatedElem.y + allocatedElem.height,
                     });
                     this._allocBoundingPolygon.push({
-                        x: time,
+                        x: allocatedElem.x,
                         y: allocatedElem.y,
                     });
 
@@ -302,11 +300,11 @@ export class TimelineChart extends TimelineViewElement {
                         stackTop += allocatedElem.height;
 
                     this._allocBoundingPolygon.push({
-                        x: time,
+                        x: allocatedElem.x + allocatedElem.width,
                         y: allocatedElem.y,
                     });
                     this._allocBoundingPolygon.push({
-                        x: time,
+                        x: allocatedElem.x + allocatedElem.width,
                         y: allocatedElem.y + allocatedElem.height,
                     });
 
@@ -328,16 +326,41 @@ export class TimelineChart extends TimelineViewElement {
             }
         }
 
-        this._allocBoundingPolygon.push({
-            x: time,
-            y: 0,
-        });
+        if (elemMap.size > 0) {
+            let finalFootprint = 0;
+            for (const [_, elem] of elemMap)
+                finalFootprint += elem.height;
 
-        for (const leftOverContainers of elemMap.keys()) {
-            const allocElem = elemMap.get(leftOverContainers)!;
-            allocElem.width = (time * this.scaleX) - allocElem.x;
-            allocElem.deallocatedAt = time;
+            for (const leftOverContainers of elemMap.keys()) {
+                const allocElem = elemMap.get(leftOverContainers)!;
+                allocElem.width = (time * this.scaleX) - allocElem.x;
+                allocElem.deallocatedAt = time;
+            }
+            this._allocBoundingPolygon.push({
+                x: time * this.scaleX,
+                y: finalFootprint,
+            });
+            this._allocBoundingPolygon.push({
+                x: time * this.scaleX,
+                y: 0,
+            });
         }
+
+        this.scopes = this.collectScopes(renderer, rootScope, 0);
+
+        this.height = this.yAxis.height;
+        this.width = this.xAxis.width;
+        this.x = 0;
+        this.y = 0 - this.height;
+        let maxY = 0;
+        for (const scope of this.scopes) {
+            const scopeMaxY = scope.y + scope.height;
+            if (scopeMaxY > maxY)
+                maxY = scopeMaxY;
+        }
+        this.height = maxY - this.y;
+
+        this.calculateMetrics();
 
         // Smooth out the allocation bounding polygon.
         // For any three points p1, p2, and p3 that all lie on the same
@@ -358,33 +381,44 @@ export class TimelineChart extends TimelineViewElement {
             const lastPoint = this._allocBoundingPolygon[
                 this._allocBoundingPolygon.length - 1
             ];
-            console.log(this.scaleY);
             allocPolygon.push({
                 x: lastPoint.x,
                 y: lastPoint.y,
             });
             this._allocBoundingPolygon = allocPolygon;
         }
-
-        this.scopes = this.collectScopes(renderer, rootScope, 0);
-
-        this.height = this.yAxis.height;
-        this.width = this.xAxis.width;
-        this.x = 0;
-        this.y = 0 - this.height;
-        let maxY = 0;
-        for (const scope of this.scopes) {
-            const scopeMaxY = scope.y + scope.height;
-            if (scopeMaxY > maxY)
-                maxY = scopeMaxY;
-        }
-        this.height = maxY - this.y;
-
-        this.calculateMetrics();
     }
 
     public topleft(): Point2D {
-        return { x: this.xAxis.x, y: this.y - this.yAxis.height };
+        return { x: this.xAxis.x, y: this.y };
+    }
+
+    public setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        super.setTemporaryContext(ctx);
+        this.xAxis.setTemporaryContext(ctx);
+        this.yAxis.setTemporaryContext(ctx);
+        for (const container of this.containers)
+            container.setTemporaryContext(ctx);
+        for (const access of this.readAccesses)
+            access.setTemporaryContext(ctx);
+        for (const access of this.writeAccesses)
+            access.setTemporaryContext(ctx);
+        for (const scope of this.scopes)
+            scope.setTemporaryContext(ctx);
+    }
+
+    public restoreContext(): void {
+        super.restoreContext();
+        this.xAxis.restoreContext();
+        this.yAxis.restoreContext();
+        for (const container of this.containers)
+            container.restoreContext();
+        for (const access of this.readAccesses)
+            access.restoreContext();
+        for (const access of this.writeAccesses)
+            access.restoreContext();
+        for (const scope of this.scopes)
+            scope.restoreContext();
     }
 
     private calculateMetrics(): void {
@@ -669,7 +703,7 @@ export class ContainerAccess extends TimelineViewElement {
         }
     }
 
-    protected _internalDraw(mousepos?: Point2D): void {
+    protected _internalDraw(_mousepos?: Point2D): void {
         if (this.mode === 'read') {
             this.ctx.beginPath();
             this.ctx.setLineDash([1, 1]);
@@ -691,13 +725,8 @@ export class ContainerAccess extends TimelineViewElement {
             this.ctx.stroke();
         }
 
-        if (this.hovered) {
-            if (mousepos) {
-                this.renderer.showTooltip(
-                    mousepos.x, mousepos.y + 50, this.label
-                );
-            }
-        }
+        if (this.hovered)
+            this.renderer.showTooltipAtMouse(this.label);
     }
 
 }
@@ -788,7 +817,7 @@ export class AllocatedContainer extends TimelineViewElement {
         return ctx.createPattern(can, 'repeat');
     };
 
-    protected _internalDraw(mousepos?: Point2D): void {
+    protected _internalDraw(_mousepos?: Point2D): void {
         if (this.conditional) {
             this.ctx.fillStyle = this.createStripedPattern(
                 8, 16, 1, this.color
@@ -825,11 +854,7 @@ export class AllocatedContainer extends TimelineViewElement {
         );
 
         if (this.hovered) {
-            if (mousepos) {
-                this.renderer.showTooltip(
-                    mousepos.x, mousepos.y + 50, this.tooltipText
-                );
-            }
+            this.renderer.showTooltipAtMouse(this.tooltipText);
             this.chart.deferredDrawCalls.add((_dMousepos) => {
                 this.ctx.strokeStyle = 'black';
                 this.ctx.strokeRect(this.x, this.y, this.width, this.height);
@@ -899,7 +924,7 @@ export class ScopeElement extends TimelineViewElement {
         return this._label;
     }
 
-    protected _internalDraw(mousepos?: Point2D): void {
+    protected _internalDraw(_mousepos?: Point2D): void {
         if (this.label.startsWith('Loop'))
             this.ctx.fillStyle = 'red';
         else if (this.label.startsWith('Conditional'))
@@ -910,13 +935,8 @@ export class ScopeElement extends TimelineViewElement {
             this.ctx.fillStyle = 'gray';
         this.ctx.fillRect(this.x, this.y, this.width, this.height);
 
-        if (this.hovered) {
-            if (mousepos) {
-                this.renderer.showTooltip(
-                    mousepos.x, mousepos.y + 50, this.label
-                );
-            }
-        }
+        if (this.hovered)
+            this.renderer.showTooltipAtMouse(this.label);
     }
 
 }

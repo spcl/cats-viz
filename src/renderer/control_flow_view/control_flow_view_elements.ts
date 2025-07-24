@@ -208,6 +208,18 @@ export class CFVConnector extends CFVElement {
         this.ctx.fill();
     }
 
+    public setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        super.setTemporaryContext(ctx);
+        for (const edge of this.edges)
+            edge.setTemporaryContext(ctx);
+    }
+
+    public restoreContext(): void {
+        super.restoreContext();
+        for (const edge of this.edges)
+            edge.restoreContext();
+    }
+
 }
 
 export class CFVControlFlowBlock extends CFVElement {
@@ -258,6 +270,22 @@ export class CFVControlFlowBlock extends CFVElement {
             this.ctx.fillRect(this.x, this.y, this.width, this.height);
             this.ctx.globalAlpha = oldAlpha;
         }
+    }
+
+    public setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        super.setTemporaryContext(ctx);
+        for (const icon of this.inConnectors)
+            icon.setTemporaryContext(ctx);
+        for (const ocon of this.outConnectors)
+            ocon.setTemporaryContext(ctx);
+    }
+
+    public restoreContext(): void {
+        super.restoreContext();
+        for (const icon of this.inConnectors)
+            icon.restoreContext();
+        for (const ocon of this.outConnectors)
+            ocon.restoreContext();
     }
 
 }
@@ -317,6 +345,18 @@ export class CFVSequence extends CFVControlFlowBlock {
 
     public get isCollapsed(): boolean {
         return this.collapsed;
+    }
+
+    public setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        super.setTemporaryContext(ctx);
+        for (const child of this.children)
+            child.setTemporaryContext(ctx);
+    }
+
+    public restoreContext(): void {
+        super.restoreContext();
+        for (const child of this.children)
+            child.restoreContext();
     }
 
 }
@@ -417,11 +457,39 @@ export class CFVConditional extends CFVControlFlowBlock {
         return this.collapsed;
     }
 
+    public setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        super.setTemporaryContext(ctx);
+        for (const branch of this.branches)
+            branch[1].setTemporaryContext(ctx);
+    }
+
+    public restoreContext(): void {
+        super.restoreContext();
+        for (const branch of this.branches)
+            branch[1].restoreContext();
+    }
+
 }
 
 export class CFVParallel extends CFVControlFlowBlock {
 
     public readonly sections: CFVControlFlowBlock[][] = [];
+
+    public setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        super.setTemporaryContext(ctx);
+        for (const section of this.sections) {
+            for (const block of section)
+                block.setTemporaryContext(ctx);
+        }
+    }
+
+    public restoreContext(): void {
+        super.restoreContext();
+        for (const section of this.sections) {
+            for (const block of section)
+                block.restoreContext();
+        }
+    }
 
 }
 

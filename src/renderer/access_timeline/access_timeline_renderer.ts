@@ -16,6 +16,7 @@ import {
     TimelineViewElementClasses,
 } from './access_timeline_elements';
 import type { SimpleRect } from 'rendure/src/types';
+import { RendererUI } from 'rendure/src/renderer/core/common/renderer_ui';
 
 
 export class AccessTimelineRenderer extends HTMLCanvasRenderer {
@@ -43,7 +44,13 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
 
         this.canvas.id = 'timeline-canvas';
 
-        this.initUI();
+        const ui = new RendererUI(this.container, this, {
+            minimap: true,
+            zoomToFit: true,
+            zoomToFitWidth: true,
+            zoomBtns: true,
+        });
+        this.initUI(ui);
     }
 
     public setTimeline(
@@ -56,6 +63,14 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
 
     public internalDraw(dt?: number, ctx?: CanvasRenderingContext2D): void {
         this.chart?.draw(this.mousePos);
+    }
+
+    protected setTemporaryContext(ctx: CanvasRenderingContext2D): void {
+        this.chart?.setTemporaryContext(ctx);
+    }
+
+    protected restoreContext(): void {
+        this.chart?.restoreContext();
     }
 
     public doForIntersectedElements(
@@ -125,162 +140,46 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
         this.chart?.minimapDraw();
     }
 
-    /*
-    public onMouseEvent(
-        event: any,
-        compXFunc: (event: any) => number,
-        compYFunc: (event: any) => number,
-        evtype: string = 'other'
-    ): boolean {
+    protected onMouseMove(event: MouseEvent): boolean {
         if (!this.chart)
-            return false;
-
-        let dirty = false;
-        let elementFocusChanged = false;
-
-        if (evtype === 'mousedown' || evtype === 'touchstart') {
-            this.dragStart = event;
-        } else if (evtype === 'mouseup') {
-            this.dragStart = null;
-        } else if (evtype === 'touchend') {
-            if (event.touches.length === 0)
-                this.dragStart = null;
-            else
-                this.dragStart = event;
-        } else if (evtype === 'mousemove') {
-            // Calculate the change in mouse position in canvas coordinates
-            this.mousePos = {
-                x: compXFunc(event),
-                y: compYFunc(event),
-            };
-            this.realMousePos = { x: event.clientX, y: event.clientY };
-
-            if (this.dragStart && event.buttons & 1) {
-                this.dragging = true;
-
-                // Mouse move in panning mode
-                this.canvasManager.translate(
-                    event.movementX, event.movementY
-                );
-
-                // Mark for redraw
-                dirty = true;
-            } else if (this.dragStart && event.buttons & 4) {
-                // Pan the view with the middle mouse button
-                this.dragging = true;
-                this.canvasManager.translate(
-                    event.movementX, event.movementY
-                );
-                dirty = true;
-                elementFocusChanged = true;
-            } else {
-                this.dragStart = null;
-                if (event.buttons & 1 || event.buttons & 4)
-                    return true; // Don't stop propagation
-            }
-        } else if (evtype === 'touchmove') {
-            if (this.dragStart.touches.length !== event.touches.length) {
-                // Different number of touches, ignore and reset drag_start
-                this.dragStart = event;
-            } else if (event.touches.length === 1) { // Move/drag
-                const movX = (
-                    event.touches[0].clientX -
-                    this.dragStart.touches[0].clientX
-                );
-                const movY = (
-                    event.touches[0].clientY -
-                    this.dragStart.touches[0].clientY
-                );
-
-                this.canvasManager.translate(movX, movY);
-                this.dragStart = event;
-
-                // Mark for redraw
-                dirty = true;
-                this.drawAsync();
-                return false;
-            } else if (event.touches.length === 2) {
-                // Find relative distance between two touches before and after.
-                // Then, center and zoom to their midpoint.
-                const touch1 = this.dragStart.touches[0];
-                const touch2 = this.dragStart.touches[1];
-                let x1 = touch1.clientX, x2 = touch2.clientX;
-                let y1 = touch1.clientY, y2 = touch2.clientY;
-                const oldCenter = [(x1 + x2) / 2.0, (y1 + y2) / 2.0];
-                const initialDistance = Math.sqrt(
-                    (x1 - x2) ** 2 + (y1 - y2) ** 2
-                );
-                x1 = event.touches[0].clientX; x2 = event.touches[1].clientX;
-                y1 = event.touches[0].clientY; y2 = event.touches[1].clientY;
-                const currentDistance = Math.sqrt(
-                    (x1 - x2) ** 2 + (y1 - y2) ** 2
-                );
-                const newCenter = [(x1 + x2) / 2.0, (y1 + y2) / 2.0];
-
-                // First, translate according to movement of center point
-                const movX = newCenter[0] - oldCenter[0];
-                const movY = newCenter[1] - oldCenter[1];
-
-                this.canvasManager.translate(movX, movY);
-
-                // Then scale
-                this.canvasManager.scale(
-                    currentDistance / initialDistance, newCenter[0],
-                    newCenter[1]
-                );
-
-                this.dragStart = event;
-
-                // Mark for redraw
-                dirty = true;
-                this.drawAsync();
-                return false;
-            }
-        } else if (evtype === 'wheel') {
-            // Get physical x,y coordinates (rather than canvas coordinates)
-            const br = this.canvas.getBoundingClientRect();
-            const x = event.clientX - (br ? br.x : 0);
-            const y = event.clientY - (br ? br.y : 0);
-            this.canvasManager.scale(event.deltaY > 0 ? 0.9 : 1.1, x, y);
-            dirty = true;
-            elementFocusChanged = true;
-        }
-
-        if (!this.mousePos)
             return true;
 
-        const elementsUnderCursor = this.findElementsUnderCursor(
+        // Calculate the change in mouse position in canvas coordinates
+        this.mousePos = this.getMouseEventRealCoords(event);
+        this.realMousePos = { x: event.clientX, y: event.clientY };
+        const mouseElements = this.findElementsUnderCursor(
             this.mousePos.x, this.mousePos.y
         );
 
-        if (elementsUnderCursor.foregroundElement) {
-            if (elementsUnderCursor.foregroundElement !== this.hoveredElement) {
-                if (this.hoveredElement)
-                    this.hoveredElement.hovered = false;
-                elementFocusChanged = true;
-                this.hoveredElement = elementsUnderCursor.foregroundElement;
-                this.hoveredElement.hovered = true;
-            }
+        // Only accept the primary mouse button as dragging source
+        if (this.dragStart && this.dragStart instanceof MouseEvent &&
+            event.buttons & 1) {
+            this.dragging = true;
+
+            // Mouse move in panning mode
+            this.panOnMouseMove(event);
+            return true;
+        } else if (this.dragStart && event.buttons & 4) {
+            // Pan the view with the middle mouse button.
+            this.dragging = true;
+            this.panOnMouseMove(event);
+            return true;
         } else {
-            if (this.hoveredElement) {
-                this.hoveredElement.hovered = false;
-                this.hoveredElement = undefined;
-                elementFocusChanged = true;
-            }
-        }
+            this.dragStart = undefined;
+            if (event.buttons & 1 || event.buttons & 4)
+                return true; // Don't stop propagation
 
-        if (elementFocusChanged) {
-            if (!this.hoveredElement)
+            this.clearHovered();
+            if (mouseElements.foregroundElement)
+                this.hoverRenderable(mouseElements.foregroundElement);
+            else
                 this.hideTooltip();
-            dirty = true;
-        }
 
-        if (dirty)
             this.drawAsync();
 
-        return false;
+            return false;
+        }
     }
-    */
 
     public getContentsBoundingBox(): SimpleRect {
         if (this.chart) {
@@ -300,9 +199,8 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
         }
     }
 
-    protected initUI(): void {
-        console.debug('Initializing access timeline UI');
-        this.enableMinimap();
+    protected initUI(ui?: RendererUI): void {
+        this._ui = ui ?? new RendererUI(this.container, this);
     }
 
 }
