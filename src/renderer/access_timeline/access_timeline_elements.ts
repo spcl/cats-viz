@@ -5,6 +5,12 @@ import {
 } from 'rendure/src/renderer/core/html_canvas/html_canvas_renderable';
 import {
     AllocationEvent,
+    CATSAccessEvent,
+    CATSAllocationEvent,
+    CATSDeallocationEvent,
+    CATSEvent,
+    CATSScopeEntryEvent,
+    CATSScopeExitEvent,
     DataAccessEvent,
     DeallocationEvent,
     InputOutputMap,
@@ -134,21 +140,540 @@ function isInputOutput(
 
 type DrawCall = (mousepos?: Point2D) => void;
 
+
+function parseTrace(
+    timeline: CATSEvent[], renderer: AccessTimelineRenderer
+): TimelineChart {
+    let nEvents = 0;
+    let maxFootprint = 0;
+
+    let currentFootprint = 0;
+    let inOutSize = 0;
+    let inSize = 0;
+    let outSize = 0;
+    const containerMap = new Map();
+    const scopesMap = new Map<string, ScopeElement>();
+    const inOutMap = new Map<string, [boolean, boolean]>();
+    for (const event of timeline) {
+        if (event.type === 'access') {
+            nEvents++;
+        } else if (event.type === 'allocation') {
+            const alloc = event as CATSAllocationEvent;
+            containerMap.set(alloc.buffer_name, alloc.size);
+            let parsedAlloc: number = 0;
+            if (typeof alloc.size === 'string') {
+                try {
+                    parsedAlloc = +alloc.size;
+                } catch (_ignored) {
+                    console.warn('Failed to parse allocation size', alloc.size);
+                }
+            } else {
+                parsedAlloc = alloc.size;
+            }
+            currentFootprint += parsedAlloc;
+            const cleanName = alloc.buffer_name.replace(
+                /^(\d*___state->__)?\d+_/g, ''
+            );
+            const [isInput, isOutput] = isInputOutput(
+                cleanName, false, renderer.inputOutputDefinitions
+            );
+            inOutMap.set(cleanName, [isInput, isOutput]);
+            if (isInput && isOutput)
+                inOutSize += parsedAlloc;
+            else if (isInput)
+                inSize += parsedAlloc;
+            else if (isOutput)
+                outSize += parsedAlloc;
+            if (currentFootprint > maxFootprint)
+                maxFootprint = currentFootprint;
+        } else if (event.type === 'deallocation') {
+            const dealloc = event as CATSDeallocationEvent;
+            currentFootprint -= containerMap.get(dealloc.buffer_name);
+            containerMap.delete(dealloc.buffer_name);
+        }
+    }
+
+    const maxHeight = 10000;
+    let targetHeight = maxFootprint;
+    const targetWidth = 10000;
+    if (targetHeight > maxHeight)
+        targetHeight = maxHeight;
+    const scaleY = targetHeight / maxFootprint;
+    const scaleX = targetWidth / nEvents;
+
+    const xAxis = new ChartAxis(
+        renderer, renderer.ctx, 'horizontal', 0, nEvents, scaleX
+    );
+    const yAxis = new ChartAxis(
+        renderer, renderer.ctx, 'vertical', 0, maxFootprint, scaleY
+    );
+
+    const containers = [];
+    const readAccesses = [];
+    const writeAccesses = [];
+    const scopes = [];
+
+    const allocationBoundingPolygon: Point2D[] = [];
+
+    let time = 0;
+    let inStackTop = 0;
+    let inOutStackTop = inStackTop - (inSize * scaleY);
+    let outStackTop = inOutStackTop - (inOutSize * scaleY);
+    let stackTop = outStackTop - (outSize * scaleY);
+    const elemMap = new Map<string, AllocatedContainer>();
+    let colorIdx = 0;
+    const maxColorIdx = KELLY_COLORS.length;
+    let nCond = 0;
+    let scopeStackDepth = 0;
+    for (const event of timeline) {
+        if (event.type === 'allocation') {
+            const alloc = event as CATSAllocationEvent;
+
+            let dataName = alloc.buffer_name;
+            dataName = dataName.replace(/^(\d*___state->__)?\d+_/g, '');
+            const [isInput, isOutput] = inOutMap.get(dataName) ?? [
+                false,
+                false,
+            ];
+            let parsedAlloc: number = 0;
+            if (typeof alloc.size === 'string') {
+                try {
+                    parsedAlloc = +alloc.size;
+                } catch (_ignored) {
+                    console.warn('Failed to parse allocation size', alloc.size);
+                }
+            } else {
+                parsedAlloc = alloc.size;
+            }
+            const allocatedElem = new AllocatedContainer(
+                renderer, renderer.ctx,
+                '#' + KELLY_COLORS[colorIdx].toString(16),
+                nCond > 0, dataName, parsedAlloc, undefined, isInput, isOutput
+            );
+            allocatedElem.allocatedAt = time;
+            containers.push(allocatedElem);
+            allocatedElem.height = parsedAlloc * scaleY;
+            allocatedElem.x = time * scaleX;
+            if (isInput && isOutput) {
+                inOutStackTop -= allocatedElem.height;
+                allocatedElem.y = inOutStackTop;
+            } else if (isInput) {
+                inStackTop -= allocatedElem.height;
+                allocatedElem.y = inStackTop;
+            } else if (isOutput) {
+                outStackTop -= allocatedElem.height;
+                allocatedElem.y = outStackTop;
+            } else {
+                stackTop -= allocatedElem.height;
+                allocatedElem.y = stackTop;
+            }
+            elemMap.set(alloc.buffer_name, allocatedElem);
+
+            allocationBoundingPolygon.push({
+                x: allocatedElem.x,
+                y: allocatedElem.y + allocatedElem.height,
+            });
+            allocationBoundingPolygon.push({
+                x: allocatedElem.x,
+                y: allocatedElem.y,
+            });
+
+            colorIdx++;
+            if (colorIdx >= maxColorIdx)
+                colorIdx = 0;
+        } else if (event.type === 'deallocation') {
+            const dealloc = event as CATSDeallocationEvent;
+            if (!elemMap.has(dealloc.buffer_name)) {
+                console.warn(
+                    'Deallocating not allocated data', dealloc.buffer_name
+                );
+                continue;
+            }
+            const allocatedElem = elemMap.get(dealloc.buffer_name)!;
+            allocatedElem.width = (time * scaleX) - allocatedElem.x;
+            allocatedElem.deallocatedAt = time;
+            if (allocatedElem.isInput && allocatedElem.isOutput)
+                inOutStackTop += allocatedElem.height;
+            else if (allocatedElem.isInput)
+                inStackTop += allocatedElem.height;
+            else if (allocatedElem.isOutput)
+                outStackTop += allocatedElem.height;
+            else
+                stackTop += allocatedElem.height;
+
+            allocationBoundingPolygon.push({
+                x: allocatedElem.x + allocatedElem.width,
+                y: allocatedElem.y,
+            });
+            allocationBoundingPolygon.push({
+                x: allocatedElem.x + allocatedElem.width,
+                y: allocatedElem.y + allocatedElem.height,
+            });
+
+            elemMap.delete(dealloc.buffer_name);
+        } else if (event.type === 'access') {
+            const accessEvent = event as CATSAccessEvent;
+            const allocatedElem = elemMap.get(accessEvent.buffer_name)!;
+            const accessElem = new ContainerAccess(
+                renderer, renderer.ctx,
+                accessEvent.mode === 'r' ? 'read' : 'write',
+                accessEvent.offset?.toString() ?? '', time, scaleX,
+                allocatedElem, nCond > 0
+            );
+            if (accessEvent.mode === 'r')
+                readAccesses.push(accessElem);
+            else
+                writeAccesses.push(accessElem);
+            time++;
+        } else if (event.type === 'scope_entry') {
+            const entry = event as CATSScopeEntryEvent;
+
+            let label = '';
+            if (entry.scope_type === 'loop') {
+                label = 'Loop';
+                label += ` ${entry.id.toString()}`;
+            } else if (entry.scope_type === 'func') {
+                label = 'Function';
+                label += ` ${entry.funcname}`;
+            } else if (entry.scope_type === 'parallel') {
+                label = 'Parallel';
+                label += ` ${entry.id.toString()}`;
+            } else {
+                label = 'Conditional';
+                label += ` ${entry.id.toString()}`;
+                nCond++;
+            }
+
+            const scope = new ScopeElement(
+                renderer, renderer.ctx, label, scopeStackDepth, time,
+                undefined, scaleX
+            );
+            scopeStackDepth++;
+
+            scopesMap.set(entry.id.toString(), scope);
+        } else { // event.type === scope_exit
+            const exit = event as CATSScopeExitEvent;
+            const scope = scopesMap.get(exit.id.toString());
+            if (!scope) {
+                console.warn('Scope exit without matching entry', exit);
+                continue;
+            }
+            if (scope.label.startsWith('Conditional'))
+                nCond--;
+            scopeStackDepth--;
+            if (scopeStackDepth < 0)
+                scopeStackDepth = 0;
+            scope.setEnd(time, scaleX);
+            if (scope.start !== time)
+                scopes.push(scope);
+            scopesMap.delete(exit.id.toString());
+        }
+    }
+
+    for (const remainingScope of scopesMap.values()) {
+        remainingScope.setEnd(time, scaleX);
+        if (remainingScope.start !== time)
+            scopes.push(remainingScope);
+    }
+
+    if (elemMap.size > 0) {
+        let finalFootprint = 0;
+        for (const [_, elem] of elemMap)
+            finalFootprint += elem.height;
+
+        for (const leftOverContainers of elemMap.keys()) {
+            const allocElem = elemMap.get(leftOverContainers)!;
+            allocElem.width = (time * scaleX) - allocElem.x;
+            allocElem.deallocatedAt = time;
+        }
+        allocationBoundingPolygon.push({
+            x: time * scaleX,
+            y: finalFootprint,
+        });
+        allocationBoundingPolygon.push({
+            x: time * scaleX,
+            y: 0,
+        });
+    }
+
+    // Smooth out the allocation bounding polygon.
+    // For any three points p1, p2, and p3 that all lie on the same
+    // x-coordinate, we remove p2.
+    let cleanedAllocationBoundingPolygon: Point2D[] = [];
+    if (allocationBoundingPolygon.length >= 3) {
+        const allocPolygon: Point2D[] = [allocationBoundingPolygon[0]];
+        for (let i = 1; i < allocationBoundingPolygon.length - 1; i++) {
+            const p1 = allocationBoundingPolygon[i - 1];
+            const p2 = allocationBoundingPolygon[i];
+            const p3 = allocationBoundingPolygon[i + 1];
+            if (p1.x === p2.x && p2.x === p3.x)
+                continue;
+            allocPolygon.push({
+                x: p2.x,
+                y: p2.y,
+            });
+        }
+        const lastPoint = allocationBoundingPolygon[
+            allocationBoundingPolygon.length - 1
+        ];
+        allocPolygon.push({
+            x: lastPoint.x,
+            y: lastPoint.y,
+        });
+        cleanedAllocationBoundingPolygon = allocPolygon;
+    }
+    return new TimelineChart(
+        xAxis, yAxis, nEvents, maxFootprint,
+        containers, readAccesses, writeAccesses,
+        scopes, scaleX, scaleY,
+        cleanedAllocationBoundingPolygon,
+        renderer
+    );
+}
+
+
+function collectScopes(
+    renderer: AccessTimelineRenderer, scope: MemoryTimelineScope,
+    depth: number, scaleX: number
+): ScopeElement[] {
+    const elements = [
+        new ScopeElement(
+            renderer, renderer.ctx,
+            scope.label, depth, scope.start_time, scope.end_time, scaleX
+        ),
+    ];
+    for (const child of scope.children) {
+        for (const nElem of collectScopes(renderer, child, depth + 1, scaleX))
+            elements.push(nElem);
+    }
+    return elements;
+}
+
+function parseTraceLegacy(
+    timeline: MemoryEvent[], rootScope: MemoryTimelineScope,
+    renderer: AccessTimelineRenderer
+): TimelineChart {
+    let nEvents = 0;
+    let maxFootprint = 0;
+
+    let currentFootprint = 0;
+    let inOutSize = 0;
+    let inSize = 0;
+    let outSize = 0;
+    const containerMap = new Map();
+    const inOutMap = new Map<string, [boolean, boolean]>();
+    for (const event of timeline) {
+        if (event.type === 'DataAccessEvent') {
+            nEvents++;
+        } else if (event.type === 'AllocationEvent') {
+            for (const data of (event as AllocationEvent).data) {
+                containerMap.set(data[0], data[1]);
+                currentFootprint += data[1];
+                const cleanName = data[0].replace(
+                    /^(\d*___state->__)?\d+_/g, ''
+                );
+                const [isInput, isOutput] = isInputOutput(
+                    cleanName, false, renderer.inputOutputDefinitions
+                );
+                inOutMap.set(cleanName, [isInput, isOutput]);
+                if (isInput && isOutput)
+                    inOutSize += data[1];
+                else if (isInput)
+                    inSize += data[1];
+                else if (isOutput)
+                    outSize += data[1];
+            }
+            if (currentFootprint > maxFootprint)
+                maxFootprint = currentFootprint;
+        } else {
+            for (const data of (event as DeallocationEvent).data) {
+                currentFootprint -= containerMap.get(data);
+                containerMap.delete(data);
+            }
+        }
+    }
+
+    const maxHeight = 10000;
+    let targetHeight = maxFootprint;
+    const targetWidth = 10000;
+    if (targetHeight > maxHeight)
+        targetHeight = maxHeight;
+    const scaleY = targetHeight / maxFootprint;
+    const scaleX = targetWidth / nEvents;
+
+    const xAxis = new ChartAxis(
+        renderer, renderer.ctx, 'horizontal', 0, nEvents, scaleX
+    );
+    const yAxis = new ChartAxis(
+        renderer, renderer.ctx, 'vertical', 0, maxFootprint, scaleY
+    );
+
+    const containers = [];
+    const readAccesses = [];
+    const writeAccesses = [];
+
+    const allocationBoundingPolygon: Point2D[] = [];
+
+    let time = 0;
+    let inStackTop = 0;
+    let inOutStackTop = inStackTop - (inSize * scaleY);
+    let outStackTop = inOutStackTop - (inOutSize * scaleY);
+    let stackTop = outStackTop - (outSize * scaleY);
+    const elemMap = new Map<string, AllocatedContainer>();
+    let colorIdx = 0;
+    const maxColorIdx = KELLY_COLORS.length;
+    for (const event of timeline) {
+        if (event.type === 'AllocationEvent') {
+            for (const data of (event as AllocationEvent).data) {
+                let dataName = data[0];
+                dataName = dataName.replace(/^(\d*___state->__)?\d+_/g, '');
+                const [isInput, isOutput] = inOutMap.get(dataName) ?? [
+                    false,
+                    false,
+                ];
+                const allocatedElem = new AllocatedContainer(
+                    renderer, renderer.ctx,
+                    '#' + KELLY_COLORS[colorIdx].toString(16),
+                    (event as AllocationEvent).conditional,
+                    dataName, data[1], undefined, isInput, isOutput
+                );
+                allocatedElem.allocatedAt = time;
+                containers.push(allocatedElem);
+                allocatedElem.height = data[1] * scaleY;
+                allocatedElem.x = time * scaleX;
+                if (isInput && isOutput) {
+                    inOutStackTop -= allocatedElem.height;
+                    allocatedElem.y = inOutStackTop;
+                } else if (isInput) {
+                    inStackTop -= allocatedElem.height;
+                    allocatedElem.y = inStackTop;
+                } else if (isOutput) {
+                    outStackTop -= allocatedElem.height;
+                    allocatedElem.y = outStackTop;
+                } else {
+                    stackTop -= allocatedElem.height;
+                    allocatedElem.y = stackTop;
+                }
+                elemMap.set(data[0], allocatedElem);
+
+                allocationBoundingPolygon.push({
+                    x: allocatedElem.x,
+                    y: allocatedElem.y + allocatedElem.height,
+                });
+                allocationBoundingPolygon.push({
+                    x: allocatedElem.x,
+                    y: allocatedElem.y,
+                });
+
+                colorIdx++;
+                if (colorIdx >= maxColorIdx)
+                    colorIdx = 0;
+            }
+        } else if (event.type === 'DeallocationEvent') {
+            for (const data of (event as DeallocationEvent).data) {
+                if (!elemMap.has(data)) {
+                    console.warn('Deallocating not allocated data', data);
+                    continue;
+                }
+                const allocatedElem = elemMap.get(data)!;
+                allocatedElem.width = (time * scaleX) - allocatedElem.x;
+                allocatedElem.deallocatedAt = time;
+                if (allocatedElem.isInput && allocatedElem.isOutput)
+                    inOutStackTop += allocatedElem.height;
+                else if (allocatedElem.isInput)
+                    inStackTop += allocatedElem.height;
+                else if (allocatedElem.isOutput)
+                    outStackTop += allocatedElem.height;
+                else
+                    stackTop += allocatedElem.height;
+
+                allocationBoundingPolygon.push({
+                    x: allocatedElem.x + allocatedElem.width,
+                    y: allocatedElem.y,
+                });
+                allocationBoundingPolygon.push({
+                    x: allocatedElem.x + allocatedElem.width,
+                    y: allocatedElem.y + allocatedElem.height,
+                });
+
+                elemMap.delete(data);
+            }
+        } else {
+            const accessEvent = event as DataAccessEvent;
+            const allocatedElem = elemMap.get(accessEvent.alloc_name)!;
+            const accessElem = new ContainerAccess(
+                renderer, renderer.ctx,
+                accessEvent.mode, accessEvent.subset, time, scaleX,
+                allocatedElem, accessEvent.conditional
+            );
+            if (accessEvent.mode === 'read')
+                readAccesses.push(accessElem);
+            else
+                writeAccesses.push(accessElem);
+            time++;
+        }
+    }
+
+    if (elemMap.size > 0) {
+        let finalFootprint = 0;
+        for (const [_, elem] of elemMap)
+            finalFootprint += elem.height;
+
+        for (const leftOverContainers of elemMap.keys()) {
+            const allocElem = elemMap.get(leftOverContainers)!;
+            allocElem.width = (time * scaleX) - allocElem.x;
+            allocElem.deallocatedAt = time;
+        }
+        allocationBoundingPolygon.push({
+            x: time * scaleX,
+            y: finalFootprint,
+        });
+        allocationBoundingPolygon.push({
+            x: time * scaleX,
+            y: 0,
+        });
+    }
+
+    const scopes = collectScopes(renderer, rootScope, 0, scaleX);
+
+    // Smooth out the allocation bounding polygon.
+    // For any three points p1, p2, and p3 that all lie on the same
+    // x-coordinate, we remove p2.
+    let cleanedAllocationBoundingPolygon: Point2D[] = [];
+    if (allocationBoundingPolygon.length >= 3) {
+        const allocPolygon: Point2D[] = [allocationBoundingPolygon[0]];
+        for (let i = 1; i < allocationBoundingPolygon.length - 1; i++) {
+            const p1 = allocationBoundingPolygon[i - 1];
+            const p2 = allocationBoundingPolygon[i];
+            const p3 = allocationBoundingPolygon[i + 1];
+            if (p1.x === p2.x && p2.x === p3.x)
+                continue;
+            allocPolygon.push({
+                x: p2.x,
+                y: p2.y,
+            });
+        }
+        const lastPoint = allocationBoundingPolygon[
+            allocationBoundingPolygon.length - 1
+        ];
+        allocPolygon.push({
+            x: lastPoint.x,
+            y: lastPoint.y,
+        });
+        cleanedAllocationBoundingPolygon = allocPolygon;
+    }
+
+    return new TimelineChart(
+        xAxis, yAxis, nEvents, maxFootprint,
+        containers, readAccesses, writeAccesses,
+        scopes, scaleX, scaleY,
+        cleanedAllocationBoundingPolygon,
+        renderer
+    );
+}
+
+
 export class TimelineChart extends TimelineViewElement {
-
-    public readonly xAxis: ChartAxis;
-    public readonly yAxis: ChartAxis;
-
-    public readonly nEvents: number;
-    public readonly maxFootprint: number;
-
-    public readonly containers: AllocatedContainer[];
-    public readonly readAccesses: ContainerAccess[];
-    public readonly writeAccesses: ContainerAccess[];
-    public readonly scopes: ScopeElement[];
-
-    public readonly scaleX: number;
-    public readonly scaleY: number;
 
     private medianReuse: number = Infinity;
     private medianRatio: number = 0.0;
@@ -157,197 +682,27 @@ export class TimelineChart extends TimelineViewElement {
 
     protected _type: string = 'TimelineChart';
 
-    protected _allocBoundingPolygon: Point2D[] = [];
 
     public constructor(
-        timeline: MemoryEvent[], rootScope: MemoryTimelineScope,
+        public readonly xAxis: ChartAxis,
+        public readonly yAxis: ChartAxis,
+
+        public readonly nEvents: number,
+        public readonly maxFootprint: number,
+
+        public readonly containers: AllocatedContainer[],
+        public readonly readAccesses: ContainerAccess[],
+        public readonly writeAccesses: ContainerAccess[],
+        public readonly scopes: ScopeElement[],
+
+        public readonly scaleX: number,
+        public readonly scaleY: number,
+
+        protected readonly _allocBoundingPolygon: Point2D[],
+
         renderer: AccessTimelineRenderer
     ) {
         super(renderer, renderer.ctx, renderer.minimapCtx);
-
-        this.nEvents = 0;
-        this.maxFootprint = 0;
-        let currentFootprint = 0;
-        let inOutSize = 0;
-        let inSize = 0;
-        let outSize = 0;
-        const containerMap = new Map();
-        const inOutMap = new Map<string, [boolean, boolean]>();
-        for (const event of timeline) {
-            if (event.type === 'DataAccessEvent') {
-                this.nEvents++;
-            } else if (event.type === 'AllocationEvent') {
-                for (const data of (event as AllocationEvent).data) {
-                    containerMap.set(data[0], data[1]);
-                    currentFootprint += data[1];
-                    const cleanName = data[0].replace(
-                        /^(\d*___state->__)?\d+_/g, ''
-                    );
-                    const [isInput, isOutput] = isInputOutput(
-                        cleanName, false, this.renderer.inputOutputDefinitions
-                    );
-                    inOutMap.set(cleanName, [isInput, isOutput]);
-                    if (isInput && isOutput)
-                        inOutSize += data[1];
-                    else if (isInput)
-                        inSize += data[1];
-                    else if (isOutput)
-                        outSize += data[1];
-                }
-                if (currentFootprint > this.maxFootprint)
-                    this.maxFootprint = currentFootprint;
-            } else {
-                for (const data of (event as DeallocationEvent).data) {
-                    currentFootprint -= containerMap.get(data);
-                    containerMap.delete(data);
-                }
-            }
-        }
-
-        const maxHeight = 10000;
-        let targetHeight = this.maxFootprint;
-        const targetWidth = 10000;
-        if (targetHeight > maxHeight)
-            targetHeight = maxHeight;
-        this.scaleY = targetHeight / this.maxFootprint;
-        this.scaleX = targetWidth / this.nEvents;
-
-        this.xAxis = new ChartAxis(
-            renderer, renderer.ctx, 'horizontal', 0, this.nEvents, this.scaleX
-        );
-        this.yAxis = new ChartAxis(
-            renderer, renderer.ctx, 'vertical', 0, this.maxFootprint,
-            this.scaleY
-        );
-
-        this.containers = [];
-        this.readAccesses = [];
-        this.writeAccesses = [];
-
-        let time = 0;
-        let inStackTop = 0;
-        let inOutStackTop = inStackTop - (inSize * this.scaleY);
-        let outStackTop = inOutStackTop - (inOutSize * this.scaleY);
-        let stackTop = outStackTop - (outSize * this.scaleY);
-        const elemMap = new Map<string, AllocatedContainer>();
-        let colorIdx = 0;
-        const maxColorIdx = KELLY_COLORS.length;
-        for (const event of timeline) {
-            if (event.type === 'AllocationEvent') {
-                for (const data of (event as AllocationEvent).data) {
-                    let dataName = data[0];
-                    dataName = dataName.replace(/^(\d*___state->__)?\d+_/g, '');
-                    const [isInput, isOutput] = inOutMap.get(dataName) ?? [
-                        false,
-                        false,
-                    ];
-                    const allocatedElem = new AllocatedContainer(
-                        renderer, renderer.ctx,
-                        '#' + KELLY_COLORS[colorIdx].toString(16),
-                        this, (event as AllocationEvent).conditional,
-                        dataName, data[1], undefined, isInput, isOutput
-                    );
-                    allocatedElem.allocatedAt = time;
-                    this.containers.push(allocatedElem);
-                    allocatedElem.height = data[1] * this.scaleY;
-                    allocatedElem.x = time * this.scaleX;
-                    if (isInput && isOutput) {
-                        inOutStackTop -= allocatedElem.height;
-                        allocatedElem.y = inOutStackTop;
-                    } else if (isInput) {
-                        inStackTop -= allocatedElem.height;
-                        allocatedElem.y = inStackTop;
-                    } else if (isOutput) {
-                        outStackTop -= allocatedElem.height;
-                        allocatedElem.y = outStackTop;
-                    } else {
-                        stackTop -= allocatedElem.height;
-                        allocatedElem.y = stackTop;
-                    }
-                    elemMap.set(data[0], allocatedElem);
-
-                    this._allocBoundingPolygon.push({
-                        x: allocatedElem.x,
-                        y: allocatedElem.y + allocatedElem.height,
-                    });
-                    this._allocBoundingPolygon.push({
-                        x: allocatedElem.x,
-                        y: allocatedElem.y,
-                    });
-
-                    colorIdx++;
-                    if (colorIdx >= maxColorIdx)
-                        colorIdx = 0;
-                }
-            } else if (event.type === 'DeallocationEvent') {
-                for (const data of (event as DeallocationEvent).data) {
-                    if (!elemMap.has(data)) {
-                        console.warn('Deallocating not allocated data', data);
-                        continue;
-                    }
-                    const allocatedElem = elemMap.get(data)!;
-                    allocatedElem.width = (
-                        time * this.scaleX
-                    ) - allocatedElem.x;
-                    allocatedElem.deallocatedAt = time;
-                    if (allocatedElem.isInput && allocatedElem.isOutput)
-                        inOutStackTop += allocatedElem.height;
-                    else if (allocatedElem.isInput)
-                        inStackTop += allocatedElem.height;
-                    else if (allocatedElem.isOutput)
-                        outStackTop += allocatedElem.height;
-                    else
-                        stackTop += allocatedElem.height;
-
-                    this._allocBoundingPolygon.push({
-                        x: allocatedElem.x + allocatedElem.width,
-                        y: allocatedElem.y,
-                    });
-                    this._allocBoundingPolygon.push({
-                        x: allocatedElem.x + allocatedElem.width,
-                        y: allocatedElem.y + allocatedElem.height,
-                    });
-
-                    elemMap.delete(data);
-                }
-            } else {
-                const accessEvent = event as DataAccessEvent;
-                const allocatedElem = elemMap.get(accessEvent.alloc_name)!;
-                const accessElem = new ContainerAccess(
-                    renderer, renderer.ctx,
-                    accessEvent.mode, accessEvent.subset, time, this.scaleX,
-                    allocatedElem, accessEvent.conditional
-                );
-                if (accessEvent.mode === 'read')
-                    this.readAccesses.push(accessElem);
-                else
-                    this.writeAccesses.push(accessElem);
-                time++;
-            }
-        }
-
-        if (elemMap.size > 0) {
-            let finalFootprint = 0;
-            for (const [_, elem] of elemMap)
-                finalFootprint += elem.height;
-
-            for (const leftOverContainers of elemMap.keys()) {
-                const allocElem = elemMap.get(leftOverContainers)!;
-                allocElem.width = (time * this.scaleX) - allocElem.x;
-                allocElem.deallocatedAt = time;
-            }
-            this._allocBoundingPolygon.push({
-                x: time * this.scaleX,
-                y: finalFootprint,
-            });
-            this._allocBoundingPolygon.push({
-                x: time * this.scaleX,
-                y: 0,
-            });
-        }
-
-        this.scopes = this.collectScopes(renderer, rootScope, 0);
-
         this.height = this.yAxis.height;
         this.width = this.xAxis.width;
         this.x = 0;
@@ -359,34 +714,23 @@ export class TimelineChart extends TimelineViewElement {
                 maxY = scopeMaxY;
         }
         this.height = maxY - this.y;
-
         this.calculateMetrics();
 
-        // Smooth out the allocation bounding polygon.
-        // For any three points p1, p2, and p3 that all lie on the same
-        // x-coordinate, we remove p2.
-        if (this._allocBoundingPolygon.length >= 3) {
-            const allocPolygon: Point2D[] = [this._allocBoundingPolygon[0]];
-            for (let i = 1; i < this._allocBoundingPolygon.length - 1; i++) {
-                const p1 = this._allocBoundingPolygon[i - 1];
-                const p2 = this._allocBoundingPolygon[i];
-                const p3 = this._allocBoundingPolygon[i + 1];
-                if (p1.x === p2.x && p2.x === p3.x)
-                    continue;
-                allocPolygon.push({
-                    x: p2.x,
-                    y: p2.y,
-                });
-            }
-            const lastPoint = this._allocBoundingPolygon[
-                this._allocBoundingPolygon.length - 1
-            ];
-            allocPolygon.push({
-                x: lastPoint.x,
-                y: lastPoint.y,
-            });
-            this._allocBoundingPolygon = allocPolygon;
-        }
+        for (const container of this.containers)
+            container.chart = this;
+    }
+
+    static fromTrace(
+        timeline: CATSEvent[], renderer: AccessTimelineRenderer
+    ): TimelineChart {
+        return parseTrace(timeline, renderer);
+    }
+
+    static fromLegacyTrace(
+        timeline: MemoryEvent[], rootScope: MemoryTimelineScope,
+        renderer: AccessTimelineRenderer
+    ): TimelineChart {
+        return parseTraceLegacy(timeline, rootScope, renderer);
     }
 
     public topleft(): Point2D {
@@ -431,23 +775,6 @@ export class TimelineChart extends TimelineViewElement {
         }
         this.medianRatio = median(allRatios);
         this.medianReuse = median(allReuse);
-    }
-
-    private collectScopes(
-        renderer: AccessTimelineRenderer, scope: MemoryTimelineScope,
-        depth: number
-    ): ScopeElement[] {
-        const elements = [
-            new ScopeElement(
-                renderer, renderer.ctx,
-                scope.label, depth, scope.start_time, scope.end_time, this
-            ),
-        ];
-        for (const child of scope.children) {
-            for (const nElem of this.collectScopes(renderer, child, depth + 1))
-                elements.push(nElem);
-        }
-        return elements;
     }
 
     public drawDeferred(mousepos?: Point2D): void {
@@ -641,7 +968,7 @@ export class ContainerAccess extends TimelineViewElement {
         renderer: AccessTimelineRenderer,
         ctx: CanvasRenderingContext2D,
         public readonly mode: 'read' | 'write',
-        public readonly subset: AccessSubset,
+        public readonly subset: AccessSubset | string,
         public readonly timestep: number,
         public readonly scaleX: number,
         public readonly container: AllocatedContainer,
@@ -658,6 +985,8 @@ export class ContainerAccess extends TimelineViewElement {
     }
 
     public get label(): string {
+        if (typeof this.subset === 'string')
+            return this.subset;
         return accessSubsetToString(this.subset);
     }
 
@@ -748,11 +1077,12 @@ export class AllocatedContainer extends TimelineViewElement {
 
     protected _type: string = 'AllocatedContainer';
 
+    private _chart?: TimelineChart;
+
     public constructor(
         renderer: AccessTimelineRenderer,
         ctx: CanvasRenderingContext2D,
         private readonly color: string,
-        private readonly chart: TimelineChart,
         private readonly conditional: boolean,
         private readonly dataName: string,
         private readonly dataBytes: number,
@@ -771,6 +1101,10 @@ export class AllocatedContainer extends TimelineViewElement {
             this.tooltipText += '\nProgram Input';
         else if (this.isOutput)
             this.tooltipText += '\nProgram Output';
+    }
+
+    public set chart(chart: TimelineChart | undefined) {
+        this._chart = chart;
     }
 
     public topleft(): Point2D {
@@ -855,7 +1189,7 @@ export class AllocatedContainer extends TimelineViewElement {
 
         if (this.hovered) {
             this.renderer.showTooltipAtMouse(this.tooltipText);
-            this.chart.deferredDrawCalls.add((_dMousepos) => {
+            this._chart?.deferredDrawCalls.add((_dMousepos) => {
                 this.ctx.strokeStyle = 'black';
                 this.ctx.strokeRect(this.x, this.y, this.width, this.height);
             });
@@ -906,14 +1240,20 @@ export class ScopeElement extends TimelineViewElement {
         renderer: AccessTimelineRenderer,
         ctx: CanvasRenderingContext2D,
         private readonly _label: string,
-        depth: number, start: number, end: number, chart: TimelineChart
+        depth: number, public readonly start: number, end: number | undefined,
+        scaleX: number
     ) {
         super(renderer, ctx);
 
         this.height = 100;
         this.y = (depth + 1) * this.height;
-        this.x = start * chart.scaleX;
-        this.width = (end * chart.scaleX) - this.x;
+        this.x = start * scaleX;
+        if (end !== undefined)
+            this.setEnd(end, scaleX);
+    }
+
+    public setEnd(end: number, scaleX: number): void {
+        this.width = (end * scaleX) - this.x;
     }
 
     public topleft(): Point2D {

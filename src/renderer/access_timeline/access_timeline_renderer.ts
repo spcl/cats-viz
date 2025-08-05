@@ -4,6 +4,7 @@ import {
     HTMLCanvasRenderer,
 } from 'rendure/src/renderer/core/html_canvas/html_canvas_renderer';
 import {
+    CATSEvent,
     InputOutputMap,
     MemoryEvent,
     MemoryTimelineScope,
@@ -53,10 +54,16 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
         this.initUI(ui);
     }
 
-    public setTimeline(
+    public setTimelineFromLegacyTrace(
         timeline: MemoryEvent[], scopes: MemoryTimelineScope[]
     ): void {
-        this.chart = new TimelineChart(timeline, scopes[0], this);
+        this.chart = TimelineChart.fromLegacyTrace(timeline, scopes[0], this);
+        this.zoomToFitContents();
+        this.drawAsync();
+    }
+
+    public setTimeline(timeline: CATSEvent[]): void {
+        this.chart = TimelineChart.fromTrace(timeline, this);
         this.zoomToFitContents();
         this.drawAsync();
     }

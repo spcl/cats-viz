@@ -12,6 +12,50 @@ import { AccessSubset } from './utils/display';
 import { readOrDecompress } from './utils/data_loading';
 
 
+export interface CATSEvent {
+    type: (
+        'scope_entry' | 'scope_exit' | 'access' | 'allocation' | 'deallocation'
+    );
+    filename: string;
+    funcname: string;
+    col: number;
+    line: number;
+}
+
+export interface CATSAccessEvent extends CATSEvent {
+    type: 'access';
+    mode: 'r' | 'w';
+    buffer_name: string;
+    offset?: number | string;
+    bytes?: number | string;
+}
+
+export interface CATSAllocationEvent extends CATSEvent {
+    type: 'allocation';
+    buffer_name: string;
+    size: number | string;
+}
+
+export interface CATSDeallocationEvent extends CATSEvent {
+    buffer_name: string;
+    type: 'deallocation';
+}
+
+export interface CATSScopeEvent extends CATSEvent {
+    type: 'scope_entry' | 'scope_exit';
+    id: number | string;
+}
+
+export interface CATSScopeEntryEvent extends CATSScopeEvent {
+    type: 'scope_entry';
+    scope_type: 'loop' | 'func' | 'parallel' | 'conditional';
+}
+
+export interface CATSScopeExitEvent extends CATSScopeEvent {
+    type: 'scope_entry';
+}
+
+
 export interface MemoryTimelineScope {
     label: string;
     scope: string;
@@ -118,6 +162,8 @@ export class AccessTimelineView {
         if (!file)
             return;
 
+        const isLegacy = $('#trace-style-legacy-input').is(':checked');
+
         const fileReader = new FileReader();
         fileReader.onload = (e) => {
             const result = e.target?.result;
@@ -126,13 +172,28 @@ export class AccessTimelineView {
                 const packedResult = readOrDecompress(result);
                 const data = JSON.parse(
                     packedResult[0]
-                ) as Record<string, unknown>;
-                const trace = data.events as MemoryEvent[] | undefined;
-                const scopes = data.scopes as MemoryTimelineScope[] | undefined;
-                if (trace && scopes)
-                    this.renderer.setTimeline(trace, scopes);
-                else
-                    console.error('Failed to load trace');
+                ) as {
+                    events?: CATSEvent[] | MemoryEvent[];
+                    scopes?: MemoryTimelineScope[];
+                };
+                if (isLegacy) {
+                    const trace = data.events;
+                    const scopes = data.scopes;
+                    if (trace && scopes) {
+                        this.renderer.setTimelineFromLegacyTrace(
+                            trace as MemoryEvent[], scopes
+                        );
+                    } else {
+                        console.error('Failed to load trace');
+                    }
+                } else {
+                    if (data.events) {
+                        const trace = data.events as CATSEvent[];
+                        this.renderer.setTimeline(trace);
+                    } else {
+                        console.error('Failed to load trace');
+                    }
+                }
             }
         };
         fileReader.readAsArrayBuffer(file);
