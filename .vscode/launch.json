@@ -5,14 +5,14 @@
             "type": "chrome",
             "request": "launch",
             "name": "Launch",
-            "url": "http://localhost:3000/access_timeline.html",
+            "url": "http://localhost:3001/access_timeline.html",
             "sourceMaps": true,
             "webRoot": "${workspaceFolder}",
             "preLaunchTask": "npm: serve",
             "sourceMapPathOverrides": {
                 "meteor://💻app/*": "${workspaceFolder}/*",
-                "webpack://@spcl/sdfv/./~/*": "${workspaceFolder}/node_modules/*",
-                "webpack://@spcl/sdfv/*": "${workspaceFolder}/*",
+                "webpack://@spcl/cats-viz/./~/*": "${workspaceFolder}/node_modules/*",
+                "webpack://@spcl/cats-viz/*": "${workspaceFolder}/*",
                 "webpack://?:*/*": "${workspaceFolder}/*"
             }
         },

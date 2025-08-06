@@ -40,7 +40,10 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
             container,
             extMouseHandler,
             initialUserTransform,
-            backgroundColor
+            backgroundColor,
+            {
+                debugDrawing: false,
+            }
         );
 
         this.canvas.id = 'timeline-canvas';
@@ -70,6 +73,19 @@ export class AccessTimelineRenderer extends HTMLCanvasRenderer {
 
     public internalDraw(dt?: number, ctx?: CanvasRenderingContext2D): void {
         this.chart?.draw(this.mousePos);
+
+        if (this.options.debugDrawing) {
+            this.chart?.debugDraw();
+            this.chart?.xAxis.debugDraw();
+            this.chart?.yAxis.debugDraw();
+            for (const cont of this.chart?.containers ?? []) {
+                cont.debugDraw();
+                for (const access of cont.accesses)
+                    access.debugDraw();
+            }
+            for (const scope of this.chart?.scopes ?? [])
+                scope.debugDraw();
+        }
     }
 
     protected setTemporaryContext(ctx: CanvasRenderingContext2D): void {

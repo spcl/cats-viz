@@ -25,7 +25,7 @@ export interface CATSEvent {
 export interface CATSAccessEvent extends CATSEvent {
     type: 'access';
     mode: 'r' | 'w';
-    buffer_name: string;
+    buffer_id: number | string;
     offset?: number | string;
     bytes?: number | string;
 }
@@ -33,11 +33,12 @@ export interface CATSAccessEvent extends CATSEvent {
 export interface CATSAllocationEvent extends CATSEvent {
     type: 'allocation';
     buffer_name: string;
+    buffer_id: number | string;
     size: number | string;
 }
 
 export interface CATSDeallocationEvent extends CATSEvent {
-    buffer_name: string;
+    buffer_id: number | string;
     type: 'deallocation';
 }
 

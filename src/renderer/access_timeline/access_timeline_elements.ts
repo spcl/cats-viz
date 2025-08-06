@@ -151,15 +151,14 @@ function parseTrace(
     let inOutSize = 0;
     let inSize = 0;
     let outSize = 0;
-    const containerMap = new Map();
-    const scopesMap = new Map<string, ScopeElement>();
+    const containerMap = new Map<string, number>();
+    const scopesMap = new Map<string, ScopeElement[]>();
     const inOutMap = new Map<string, [boolean, boolean]>();
     for (const event of timeline) {
         if (event.type === 'access') {
             nEvents++;
         } else if (event.type === 'allocation') {
             const alloc = event as CATSAllocationEvent;
-            containerMap.set(alloc.buffer_name, alloc.size);
             let parsedAlloc: number = 0;
             if (typeof alloc.size === 'string') {
                 try {
@@ -170,6 +169,7 @@ function parseTrace(
             } else {
                 parsedAlloc = alloc.size;
             }
+            containerMap.set(alloc.buffer_id.toString(), parsedAlloc);
             currentFootprint += parsedAlloc;
             const cleanName = alloc.buffer_name.replace(
                 /^(\d*___state->__)?\d+_/g, ''
@@ -188,8 +188,10 @@ function parseTrace(
                 maxFootprint = currentFootprint;
         } else if (event.type === 'deallocation') {
             const dealloc = event as CATSDeallocationEvent;
-            currentFootprint -= containerMap.get(dealloc.buffer_name);
-            containerMap.delete(dealloc.buffer_name);
+            currentFootprint -= containerMap.get(
+                dealloc.buffer_id.toString()
+            ) ?? 0;
+            containerMap.delete(dealloc.buffer_id.toString());
         }
     }
 
@@ -221,6 +223,7 @@ function parseTrace(
     let outStackTop = inOutStackTop - (inOutSize * scaleY);
     let stackTop = outStackTop - (outSize * scaleY);
     const elemMap = new Map<string, AllocatedContainer>();
+    let elemStack: AllocatedContainer[] = [];
     let colorIdx = 0;
     const maxColorIdx = KELLY_COLORS.length;
     let nCond = 0;
@@ -252,6 +255,7 @@ function parseTrace(
             );
             allocatedElem.allocatedAt = time;
             containers.push(allocatedElem);
+            elemStack.push(allocatedElem);
             allocatedElem.height = parsedAlloc * scaleY;
             allocatedElem.x = time * scaleX;
             if (isInput && isOutput) {
@@ -267,7 +271,7 @@ function parseTrace(
                 stackTop -= allocatedElem.height;
                 allocatedElem.y = stackTop;
             }
-            elemMap.set(alloc.buffer_name, allocatedElem);
+            elemMap.set(alloc.buffer_id.toString(), allocatedElem);
 
             allocationBoundingPolygon.push({
                 x: allocatedElem.x,
@@ -283,13 +287,13 @@ function parseTrace(
                 colorIdx = 0;
         } else if (event.type === 'deallocation') {
             const dealloc = event as CATSDeallocationEvent;
-            if (!elemMap.has(dealloc.buffer_name)) {
+            if (!elemMap.has(dealloc.buffer_id.toString())) {
                 console.warn(
-                    'Deallocating not allocated data', dealloc.buffer_name
+                    'Deallocating not allocated data', dealloc.buffer_id
                 );
                 continue;
             }
-            const allocatedElem = elemMap.get(dealloc.buffer_name)!;
+            const allocatedElem = elemMap.get(dealloc.buffer_id.toString())!;
             allocatedElem.width = (time * scaleX) - allocatedElem.x;
             allocatedElem.deallocatedAt = time;
             if (allocatedElem.isInput && allocatedElem.isOutput)
@@ -310,10 +314,25 @@ function parseTrace(
                 y: allocatedElem.y + allocatedElem.height,
             });
 
-            elemMap.delete(dealloc.buffer_name);
+            elemMap.delete(dealloc.buffer_id.toString());
+
+            const newElemStack: AllocatedContainer[] = [];
+            let dip = false;
+            for (const elem of elemStack) {
+                if (elem === allocatedElem) {
+                    dip = true;
+                } else {
+                    newElemStack.push(elem);
+                    if (dip)
+                        elem.dips.push([time * scaleX, allocatedElem.height]);
+                }
+            }
+            elemStack = newElemStack;
         } else if (event.type === 'access') {
             const accessEvent = event as CATSAccessEvent;
-            const allocatedElem = elemMap.get(accessEvent.buffer_name)!;
+            const allocatedElem = elemMap.get(
+                accessEvent.buffer_id.toString()
+            )!;
             const accessElem = new ContainerAccess(
                 renderer, renderer.ctx,
                 accessEvent.mode === 'r' ? 'read' : 'write',
@@ -350,14 +369,19 @@ function parseTrace(
             );
             scopeStackDepth++;
 
-            scopesMap.set(entry.id.toString(), scope);
+            const ident = entry.id.toString();
+            const identScopes = scopesMap.get(ident) ?? [];
+            identScopes.push(scope);
+            scopesMap.set(ident, identScopes);
         } else { // event.type === scope_exit
             const exit = event as CATSScopeExitEvent;
-            const scope = scopesMap.get(exit.id.toString());
-            if (!scope) {
+            const ident = exit.id.toString();
+            const identScopes = scopesMap.get(ident) ?? [];
+            if (identScopes.length === 0) {
                 console.warn('Scope exit without matching entry', exit);
                 continue;
             }
+            const scope = identScopes[identScopes.length - 1];
             if (scope.label.startsWith('Conditional'))
                 nCond--;
             scopeStackDepth--;
@@ -366,21 +390,19 @@ function parseTrace(
             scope.setEnd(time, scaleX);
             if (scope.start !== time)
                 scopes.push(scope);
-            scopesMap.delete(exit.id.toString());
+            scopesMap.set(ident, identScopes.slice(0, -1));
         }
     }
 
-    for (const remainingScope of scopesMap.values()) {
-        remainingScope.setEnd(time, scaleX);
-        if (remainingScope.start !== time)
-            scopes.push(remainingScope);
+    for (const remainingScopes of scopesMap.values()) {
+        for (const scopeElem of remainingScopes) {
+            scopeElem.setEnd(time, scaleX);
+            if (scopeElem.start !== time)
+                scopes.push(scopeElem);
+        }
     }
 
     if (elemMap.size > 0) {
-        let finalFootprint = 0;
-        for (const [_, elem] of elemMap)
-            finalFootprint += elem.height;
-
         for (const leftOverContainers of elemMap.keys()) {
             const allocElem = elemMap.get(leftOverContainers)!;
             allocElem.width = (time * scaleX) - allocElem.x;
@@ -388,7 +410,7 @@ function parseTrace(
         }
         allocationBoundingPolygon.push({
             x: time * scaleX,
-            y: finalFootprint,
+            y: stackTop,
         });
         allocationBoundingPolygon.push({
             x: time * scaleX,
@@ -1032,6 +1054,10 @@ export class ContainerAccess extends TimelineViewElement {
         }
     }
 
+    public topleft(): Point2D {
+        return { x: this.x, y: this.y };
+    }
+
     protected _internalDraw(_mousepos?: Point2D): void {
         if (this.mode === 'read') {
             this.ctx.beginPath();
@@ -1069,6 +1095,8 @@ export class AllocatedContainer extends TimelineViewElement {
     private totalUseTimespan: number = 0;
     private reuseDistances: number[] = [];
     private tooltipText: string;
+
+    public readonly dips: [number, number][] = [];
 
     public readonly accesses: ContainerAccess[] = [];
 
@@ -1151,6 +1179,122 @@ export class AllocatedContainer extends TimelineViewElement {
         return ctx.createPattern(can, 'repeat');
     };
 
+    private makeShape(startX?: number, endX?: number): void {
+        const topleft = this.topleft();
+        let nextX = startX ?? topleft.x;
+        let nextY = topleft.y;
+        if (startX !== undefined) {
+            for (const dip of this.dips) {
+                if (dip[0] < startX)
+                    nextY += dip[1];
+                else
+                    break;
+            }
+        }
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(nextX, nextY);
+        for (const dip of this.dips) {
+            if (startX !== undefined && dip[0] < startX)
+                continue;
+            if (endX !== undefined && dip[0] > endX)
+                break;
+
+            nextX = dip[0];
+            this.ctx.lineTo(nextX, nextY);
+            nextX += 10; // TODO: This should be adaptive
+            nextY += dip[1];
+            this.ctx.lineTo(nextX, nextY);
+        }
+        nextX = endX ?? topleft.x + this.width;
+        this.ctx.lineTo(nextX, nextY);
+        nextY += this.height;
+        this.ctx.lineTo(nextX, nextY);
+        for (let i = this.dips.length - 1; i >= 0; i--) {
+            const dip = this.dips[i];
+            if (endX !== undefined && dip[0] > endX)
+                continue;
+            if (startX !== undefined && dip[0] < startX)
+                break;
+            nextX = dip[0];
+            this.ctx.lineTo(nextX, nextY);
+            nextY -= dip[1];
+            this.ctx.lineTo(nextX, nextY);
+        }
+        nextX = startX ?? this.x;
+        this.ctx.lineTo(nextX, nextY);
+        this.ctx.closePath();
+    }
+
+    private drawShape(stroke: boolean = false): void {
+        if (this.dips.length > 0) {
+            if (stroke) {
+                this.makeShape();
+                this.ctx.stroke();
+            } else {
+                let solidStartX = undefined;
+                let solidEndX = undefined;
+                if (!this.isInput && this.firstUseX !== undefined) {
+                    this.ctx.globalAlpha = 0.3;
+                    this.makeShape(undefined, this.firstUseX);
+                    this.ctx.fill();
+                    solidStartX = this.firstUseX;
+                }
+                if (!this.isOutput && this.lastUseX !== undefined) {
+                    this.ctx.globalAlpha = 0.3;
+                    this.makeShape(this.lastUseX, undefined);
+                    this.ctx.fill();
+                    solidEndX = this.lastUseX;
+                }
+                if (
+                    !this.isOutput &&
+                    !this.isInput &&
+                    this.lastUseX === undefined &&
+                    this.firstUseX === undefined
+                )
+                    this.ctx.globalAlpha = 0.3;
+                else
+                    this.ctx.globalAlpha = 1.0;
+                this.makeShape(solidStartX, solidEndX);
+                this.ctx.fill();
+            }
+        } else {
+            if (stroke) {
+                this.ctx.strokeRect(this.x, this.y, this.width, this.height);
+            } else {
+                let solidStartX = this.x;
+                let solidEndX = this.x + this.width;
+                if (!this.isInput && this.firstUseX !== undefined) {
+                    this.ctx.globalAlpha = 0.3;
+                    this.ctx.fillRect(
+                        this.x, this.y, this.firstUseX - this.x, this.height
+                    );
+                    solidStartX = this.firstUseX;
+                }
+                if (!this.isOutput && this.lastUseX !== undefined) {
+                    this.ctx.globalAlpha = 0.3;
+                    this.ctx.fillRect(
+                        this.lastUseX, this.y,
+                        (this.x + this.width) - this.lastUseX, this.height
+                    );
+                    solidEndX = this.lastUseX;
+                }
+                if (
+                    !this.isOutput &&
+                    !this.isInput &&
+                    this.lastUseX === undefined &&
+                    this.firstUseX === undefined
+                )
+                    this.ctx.globalAlpha = 0.3;
+                else
+                    this.ctx.globalAlpha = 1.0;
+                this.ctx.fillRect(
+                    solidStartX, this.y, solidEndX - solidStartX, this.height
+                );
+            }
+        }
+    }
+
     protected _internalDraw(_mousepos?: Point2D): void {
         if (this.conditional) {
             this.ctx.fillStyle = this.createStripedPattern(
@@ -1160,40 +1304,49 @@ export class AllocatedContainer extends TimelineViewElement {
             this.ctx.fillStyle = this.color;
         }
 
-        let solidStartX = this.x;
-        let solidEndX = this.x + this.width;
-        if (!this.isInput && this.firstUseX !== undefined) {
-            this.ctx.globalAlpha = 0.3;
-            this.ctx.fillRect(
-                this.x, this.y, this.firstUseX - this.x, this.height
-            );
-            solidStartX = this.firstUseX;
-        }
-        if (!this.isOutput && this.lastUseX !== undefined) {
-            this.ctx.globalAlpha = 0.3;
-            this.ctx.fillRect(
-                this.lastUseX, this.y,
-                (this.x + this.width) - this.lastUseX, this.height
-            );
-            solidEndX = this.lastUseX;
-        }
-        if (!this.isOutput && !this.isInput && this.lastUseX === undefined &&
-            this.firstUseX === undefined
-        )
-            this.ctx.globalAlpha = 0.3;
-        else
-            this.ctx.globalAlpha = 1.0;
-        this.ctx.fillRect(
-            solidStartX, this.y, solidEndX - solidStartX, this.height
-        );
+        this.drawShape();
 
         if (this.hovered) {
             this.renderer.showTooltipAtMouse(this.tooltipText);
             this._chart?.deferredDrawCalls.add((_dMousepos) => {
                 this.ctx.strokeStyle = 'black';
-                this.ctx.strokeRect(this.x, this.y, this.width, this.height);
+                this.drawShape(true);
             });
         }
+    }
+
+    public intersect(
+        x: number, y: number, w: number = 0, h: number = 0
+    ): boolean {
+        if (this.dips.length === 0) {
+            return super.intersect(x, y, w, h);
+        } else {
+            let lastY = this.y;
+            let lastX = this.x;
+            for (const dip of this.dips) {
+                let intersects = false;
+                const box = {
+                    x: lastX,
+                    y: lastY,
+                    w: dip[0] - lastX,
+                    h: this.height,
+                };
+                if (w === 0 || h === 0) {  // Point-element intersection
+                    intersects = (x >= box.x) && (x <= box.x + this.width) &&
+                        (y >= box.y) && (y <= box.y + this.height);
+                } else {                 // Box-element intersection
+                    intersects = (x <= box.x + this.width) &&
+                        (x + w >= box.x) && (y <= box.y + this.height) &&
+                        (y + h >= box.y);
+                }
+                if (intersects)
+                    return true;
+
+                lastX = dip[0];
+                lastY += dip[1];
+            }
+        }
+        return false;
     }
 
     public calculateReuse(): [number, number] {
@@ -1265,6 +1418,7 @@ export class ScopeElement extends TimelineViewElement {
     }
 
     protected _internalDraw(_mousepos?: Point2D): void {
+        this.ctx.globalAlpha = 1;
         if (this.label.startsWith('Loop'))
             this.ctx.fillStyle = 'red';
         else if (this.label.startsWith('Conditional'))
