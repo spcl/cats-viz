@@ -1,22 +1,23 @@
-<!-- Copyright 2019-2025 ETH Zurich and the DaCe authors. All rights reserved. -->
+<!-- Copyright (c) ETH Zurich and the cats-viz authors. All rights reserved. -->
 
 <!DOCTYPE html>
-<html lang="en" class="sdfv">
+<html lang="en" class="cats-viz">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SDFV: Access Statistics</title>
+    <title>C.A.T.S. Visualilzer: Access Statistics</title>
 
     <script defer src="./dist/access_stats.js"></script>
 </head>
 
-<body class="sdfv">
+<body class="cats-viz">
     <div class="container-fluid" id="header-container">
         <div class="row g-2 mb-2">
             <div class="col-auto">
                 <input type="file" id="sdfg-access-stats-file-input"
-                    accept=".json" class="form-control form-control-sm">
+                    accept=".access_stats.json"
+                    class="form-control form-control-sm">
             </div>
             <div class="col-auto">
                 <div class="input-group input-group-sm">
@@ -69,10 +70,10 @@
                     </label>
                     <select id="sdfg-access-stats-group-by"
                             class="form-select">
-                        <option value="sdfg" selected="selected">
+                        <option value="sdfg">
                             SDFG
                         </option>
-                        <option value="container">
+                        <option value="container" selected="selected">
                             Data Container
                         </option>
                     </select>

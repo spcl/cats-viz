@@ -4,7 +4,7 @@ import $ from 'jquery';
 
 import 'bootstrap';
 
-import '../scss/control_flow_view.scss';
+import '../scss/cats-viz.scss';
 import {
     CFVBasicBlock,
     CFVConditional,

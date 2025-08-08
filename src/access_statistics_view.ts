@@ -4,6 +4,7 @@ import $ from 'jquery';
 
 import 'bootstrap';
 
+import '../scss/cats-viz.scss';
 import {
     BarController,
     BarElement,
@@ -15,7 +16,6 @@ import {
     Tooltip,
 } from 'chart.js';
 import ChartDataLabels, { Context } from 'chartjs-plugin-datalabels';
-import '../scss/access_statistics.scss';
 import { readOrDecompress } from './utils/data_loading';
 
 interface Subset {

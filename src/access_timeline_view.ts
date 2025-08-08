@@ -117,6 +117,15 @@ export class AccessTimelineView {
             'change.cats-viz', '#trace-file-input',
             this.loadTrace.bind(this)
         );
+        $(document).on(
+            'change.cats-viz', '#trace-style-legacy-input',
+            () => {
+                const isLegacy = $('#trace-style-legacy-input').is(':checked');
+                $('#trace-file-input').attr(
+                    'accept', isLegacy ? '.trace.json' : '.cats'
+                );
+            }
+        );
 
         const container = timelineContainer.find('#contents');
         this.renderer = new AccessTimelineRenderer(container);
