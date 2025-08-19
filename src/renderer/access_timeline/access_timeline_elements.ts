@@ -1,5 +1,7 @@
 // Copyright (c) ETH Zurich and the cats-viz authors. All rights reserved.
 
+import $ from 'jquery';
+
 import {
     HTMLCanvasRenderable,
 } from 'rendure/src/renderer/core/html_canvas/html_canvas_renderable';
@@ -217,6 +219,7 @@ function parseTrace(
 
     const allocationBoundingPolygon: Point2D[] = [];
 
+    let gottenRootFnScope = false;
     let time = 0;
     let inStackTop = 0;
     let inOutStackTop = inStackTop - (inSize * scaleY);
@@ -352,6 +355,14 @@ function parseTrace(
                 label = 'Loop';
                 label += ` ${entry.id.toString()}`;
             } else if (entry.scope_type === 'func') {
+                if (!gottenRootFnScope) {
+                    if (entry.funcname === 'main')
+                        gottenRootFnScope = true;
+                } else if (
+                    $('#show-fn-scopes-input').prop('checked') === false
+                ) {
+                    continue;
+                }
                 label = 'Function';
                 label += ` ${entry.funcname}`;
             } else if (entry.scope_type === 'parallel') {
@@ -378,7 +389,7 @@ function parseTrace(
             const ident = exit.id.toString();
             const identScopes = scopesMap.get(ident) ?? [];
             if (identScopes.length === 0) {
-                console.warn('Scope exit without matching entry', exit);
+                //console.warn('Scope exit without matching entry', exit);
                 continue;
             }
             const scope = identScopes[identScopes.length - 1];

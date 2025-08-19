@@ -11,7 +11,7 @@ import { Buffer } from 'buffer';
  *             whether the original string was compressed or not.
  */
 export function readOrDecompress(
-    json: string | ArrayBuffer
+    json: string | ArrayBuffer | Uint8Array
 ): [string, boolean] {
     try {
         return [
